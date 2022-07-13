@@ -14,7 +14,7 @@ from monai.transforms import Resize, AddChannel
 
 from utils.transforms import prepare_transforms
 
-def read_fns(in_dir='./fetoscopy-placenta-dataset/Fetoscopy Placenta Dataset/Vessel_segmentation_annotations', debug=False):
+def read_fns(in_dir='./fetoscopy-placenta-dataset/Fetoscopy Placenta Dataset/Vessel_segmentation_annotations', debug=False, task='segmentation'):
  
     
     set_determinism(seed=0)
@@ -26,18 +26,24 @@ def read_fns(in_dir='./fetoscopy-placenta-dataset/Fetoscopy Placenta Dataset/Ves
     val_images = sorted([el for el in paths_images if 'video01' in el])
     train_segs = sorted([el for el in paths_segs if 'video01' not in el])
     val_segs = sorted([el for el in paths_segs if 'video01' in el])
+    if task == 'reconstruction':
+        train_segs = train_segs + val_segs
+        train_images = train_images + val_images
+        val_images = train_images
+        val_segs = train_segs
 
-    train_files = [{"image": image, "seg": seg} for image, seg in zip(train_images, train_segs)]
-    val_files = [{"image": image, "seg": seg} for image, seg in zip(val_images, val_segs)]
+    train_files = [{"image": image, "seg": seg, "fn": image} for image, seg in zip(train_images, train_segs)]
+    val_files = [{"image": image, "seg": seg, "fn": image} for image, seg in zip(val_images, val_segs)]
+    print("Train:", len(train_files), "Val:", len(val_files))
     if debug: 
         train_files = train_files[:4]
         val_files = val_files[:4]
 
     return train_files, val_files
 
-def prepare_loaders(spatial_size=[448, 448], cache=True, batch_size=4, debug=False):
+def prepare_loaders(spatial_size=[224, 224], cache=True, batch_size=4, debug=False, task='segmentation'):
  
-    train_files, val_files = read_fns(debug=debug)
+    train_files, val_files = read_fns(debug=debug, task=task)
 
     
     train_transforms, val_transforms = prepare_transforms(spatial_size=spatial_size)

@@ -1,15 +1,17 @@
 from tqdm import tqdm
 import numpy as np
 import os
+import cv2
 import sys
 import logging
 import argparse
-from sklearn.metrics import confusion_matrix
+
 
 # Torch
 import torch
 import torch.nn.functional as nnf
 from torch.utils.tensorboard import SummaryWriter
+
 
 
 
@@ -22,7 +24,7 @@ from ignite.engine import (
     create_supervised_trainer,
 )
 from ignite.handlers import ModelCheckpoint
-from ignite.metrics import Accuracy, ConfusionMatrix, mIoU
+
 
 # MONAI
 import monai
@@ -62,7 +64,8 @@ if __name__ == "__main__":
     print('--------')
 
 
-    out_channels = 2 
+    out_channels = 3 if args.task == 'reconstruction' else 2
+
 
     # Create Model, Loss, and Optimizer
     device = torch.device(f"cuda:{args.gpu}")
@@ -70,7 +73,8 @@ if __name__ == "__main__":
 
     
     train_loader, val_loader = prepare_loaders(batch_size=args.batch_size, 
-                                       debug=args.debug
+                                       debug=args.debug,
+                                       task=args.task
                                        )
     writer = SummaryWriter(log_dir = args.log_dir)
     check_data = first(train_loader)
@@ -78,19 +82,28 @@ if __name__ == "__main__":
 
 
 
+
        
     # Hyperparameters
-    loss = DiceCELoss(to_onehot_y=True, softmax=True, include_background=True, jaccard=True) 
+    if args.task == 'segmentation':
+        loss = DiceCELoss(to_onehot_y=True, softmax=True, include_background=True, jaccard=True) 
+    else:
+        loss = torch.nn.MSELoss()
     lr = args.lr
     opt = torch.optim.Adam(net.parameters(), lr, weight_decay=1e-5)
  
     def prepare_batch(batch, device=None, non_blocking=False):
         imgs = batch["image"]
         segs = batch["seg"]
+
         segs = (segs > 0) * 1 # Binarize
         segs, _ = torch.max(segs, dim=1) # Collapse to 1 channel
         segs = segs.unsqueeze(dim=1)
-        return _prepare_batch((imgs, segs), device, non_blocking)
+        if args.task == 'segmentation':
+            return _prepare_batch((imgs, segs), device, non_blocking)
+        elif args.task == 'reconstruction':
+            return _prepare_batch((imgs, imgs), device, non_blocking)
+
 
     trainer = create_supervised_trainer(
         net, opt, loss, device, False, prepare_batch=prepare_batch
@@ -117,24 +130,24 @@ if __name__ == "__main__":
     train_lr_handler.attach(trainer)
 
     # Validation configuration
-    validation_every_n_iters = args.eval_every
-    def binary_one_hot_output_transform(output):
-        y_pred, y = output
+    validation_every_n_iters = args.eval_every if not args.eval_only else 1
+    
         
-        y_pred = torch.cat(y_pred).flatten()
-        y = torch.cat(y).flatten()
-        #y_pred = torch.sigmoid(y_pred).round().long()
-        y_pred = ignite.utils.to_onehot(y_pred.round().long(), 2)
-        y = y.long()
-        return y_pred, y
-    metric_name = "Mean_Dice"
-    m_IoU = mIoU(ConfusionMatrix(num_classes=2, output_transform=binary_one_hot_output_transform))
-    val_metrics = {metric_name: MeanDice(), 'mIoU': m_IoU}
+    if args.task == 'segmentation':
+        metric_name = "Mean_Dice"
+        val_metrics = {metric_name: MeanDice(include_background=False)} 
+    elif args.task == 'reconstruction':
+        metric_name = "MSE"
+        val_metrics = {metric_name: MeanSquaredError()}
 
     num_classes = 2
 
-    post_pred = AsDiscrete(argmax=True, to_onehot=num_classes)
-    post_label = AsDiscrete(to_onehot=num_classes)
+    if args.task == 'segmentation':
+        post_pred = AsDiscrete(argmax=True, to_onehot=num_classes)
+        post_label = AsDiscrete(to_onehot=num_classes)
+    elif args.task == 'reconstruction':
+        post_pred = Identity()
+        post_label = Identity()
 
     evaluator = create_supervised_evaluator(
         net,
@@ -145,11 +158,45 @@ if __name__ == "__main__":
         prepare_batch=prepare_batch,
     )
 
+    def dice_loss(input, target):
+        smooth = 1.
 
+        iflat = input.view(-1)
+        tflat = target.view(-1)
+        intersection = (iflat * tflat).sum()
+    
+        return 1 - ((2. * intersection + smooth) /
+                  (iflat.sum() + tflat.sum() + smooth))
 
     @trainer.on(Events.ITERATION_COMPLETED(every=validation_every_n_iters))
     def run_validation(engine):
         evaluator.run(val_loader)
+        if args.eval_only:
+
+            with torch.no_grad():
+
+                for batch in tqdm(val_loader):
+                    fns = [el.split('/')[-1] for el in batch['fn']]
+                
+                    (images, labels) = prepare_batch(batch, device=device)
+                    preds = torch.argmax(net(images), dim=1).unsqueeze(dim=1)
+                    preds_raw = 1 / ( 1 + np.exp(-net(images).cpu().detach().numpy()))
+
+                    imgs = [torch.mean(el, dim=0) for el in images]
+                    for img, pred, gt, fn, pred_raw in zip(imgs, preds, labels, fns, preds_raw):
+
+
+                        cv2.imwrite(f'./data/imgs/{fn}', np.expand_dims(img.cpu().detach().numpy(), axis=2) * 255)
+                        cv2.imwrite(f'./data/preds/{fn}', pred.cpu().detach().numpy().transpose(1, 2, 0) * 255)
+                        np.save(f'./data/preds_raw/{fn}.npy', pred_raw.transpose(1, 2, 0))
+                        cv2.imwrite(f'./data/gts/{fn}', gt.cpu().detach().numpy().transpose(1, 2, 0) * 255)
+                    #np.save('./pred_prob.npy', preds[0].cpu().detach().numpy().reshape(448, 448, 2))
+            exit()
+                
+
+
+
+
 
 
     @trainer.on(Events.ITERATION_COMPLETED(every=validation_every_n_iters))

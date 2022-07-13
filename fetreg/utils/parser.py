@@ -17,10 +17,16 @@ def prepare_parser(parser):
                          help='Logs directory.')
     parser.add_argument('--save_every', type=int, default=115,
                          help='Number of epochs to save a model.')
-    parser.add_argument('--eval_every', type=int, default=115,
+    parser.add_argument('--eval_every', type=int, default=23,
                          help='Number of iterations to evaluate model.')
     parser.add_argument('--load_weights', type=str, default=None,
                          help='Load model from this directory.')
     parser.add_argument('--debug', default=False, action='store_true',
                          help='Debug with one sample for training and validation.')
+    parser.add_argument('--eval_only', default=False, action='store_true',
+                         help='Only evaluate.')
+    parser.add_argument('--task', type=str, default='segmentation',
+                         help='Task of the model - [segmentation, reconstruction].')
+    parser.add_argument('--arch', type=str, default='unet',
+                         help='Architecture of the model - [unet, unet++].')
     return parser
